@@ -1,4 +1,3 @@
-# game-test
+# ziggame
 
-Genre:
-- Roguelite
+A Zig-made game engine
