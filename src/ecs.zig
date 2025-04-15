@@ -2,25 +2,24 @@ const std = @import("std");
 
 const arch = @import("ecs/archetype.zig");
 
+const Archetype = arch.Archetype;
+
 pub const Entity = u64;
 
-// // A simple assumption for the structure of an ECS could be using:
-// pub const BadWorld = std.MultiArrayList(struct { Entity, ... });
-// // This technically works, but there is a major flaw:
-// // Iteration over all of the entries is very slow (bad for games)
-
-// How can we fix this?
-// Split every different combination of components into separate "tables" / archetypes.
-// We don't know these at comptime, however.
-// So we use hashmaps.
 pub const World = struct {
     allocator: std.mem.Allocator,
     counter: Entity = 0,
-    entities: std.AutoArrayHashMapUnmanaged(Entity, void),
+    entities: Handles = .{},
     archetypes: Tables = .{},
 
     const Self = @This();
-    const Tables = std.AutoHashMapUnmanaged(arch.Archetype.Hash, arch.Archetype);
+    const Tables = std.AutoHashMapUnmanaged(Archetype.Hash, Archetype);
+    const Handles = std.AutoHashMapUnmanaged(Entity, Handle);
+
+    const Handle = struct {
+        hash: Archetype.Hash,
+        idx: usize,
+    };
 
     pub fn init(allocator: std.mem.Allocator) !Self {
         var self = Self{
@@ -29,14 +28,61 @@ pub const World = struct {
 
         try self.archetypes.putNoClobber(
             allocator,
-            arch.Archetype.empty_hash,
-            arch.Archetype.empty(),
+            Archetype.empty_hash,
+            Archetype{ .hash = Archetype.empty_hash },
         );
+
+        return self;
     }
 
-    fn newEntity(self: *Self) !void {
-        if (self.entities.entries.len == std.math.maxInt(Entity)) return error.TooManyEntities;
-        while (self.entities.getEntry(self.counter) != null) self.counter += 1;
-        try self.entities.putNoClobber(self.allocator, self.counter, {});
+    pub fn deinit(self: *Self) void {
+        var iter = self.archetypes.valueIterator();
+        while (iter.next()) |archetype| {
+            archetype.deinit(self.allocator);
+        }
+
+        self.archetypes.deinit(self.allocator);
+        self.entities.deinit(self.allocator);
+    }
+
+    pub fn newEntity(self: *Self) !Entity {
+        const entity = self.counter;
+        self.counter += 1;
+
+        const empty_arch = self.archetypes.getEntry(Archetype.empty_hash).?.value_ptr;
+        const idx = try empty_arch.allocateEntity(self.allocator, entity);
+        const handle = Handle{
+            .hash = Archetype.empty_hash,
+            .idx = idx,
+        };
+
+        self.entities.putNoClobber(self.allocator, entity, handle) catch |err| {
+            empty_arch.undoEntityAllocation();
+            return err;
+        };
+
+        return entity;
+    }
+
+    pub fn archetypeById(self: *Self, entity: Entity) ?*Archetype {
+        const handle = self.entities.getPtr(entity) orelse return null;
+        return self.archetypes.getPtr(handle.hash);
+    }
+
+    pub fn setComponent(self: *Self, entity: Entity, component: anytype) !void {
+        const T = @TypeOf(component);
+        const type_name = @typeName(T);
+
+        const archetype = self.archetypeById(entity).?;
+        const old_hash = archetype.hash;
+        const have_already = archetype.components.contains(type_name);
+        const mask = if (have_already) 0 else std.hash_map.hashString(type_name);
+
+        const archetype_entry = try self.archetypes.getOrPut(self.allocator, old_hash ^ mask);
+        if (!archetype_entry.found_existing) {
+            archetype_entry.value_ptr.* = Archetype{ .hash = 0 };
+        }
+
+        unreachable; // TODO: finish `setComponent`
     }
 };
